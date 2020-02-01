@@ -1,0 +1,168 @@
+---
+title: "Meta-Analysis Simulation"
+author: "Niki Petrakos"
+date: "July 1, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(stacomirtools)
+library(simsalapar)
+```
+
+
+```{r, replications}
+## Create setup for simulation
+varList <- varlist(
+  n.sim = list(type = "N", expr = quote(N[sim]), value = 100000),  # make value larger once this starts working
+  K = list(type = "grid", value = c(5, 15, 25)),
+  M = list(type = "grid", value = c(20, 800)),
+  MSDratio = list(type = "grid", value = c(1/3, 1/2)),
+  tau = list(type = "grid", value = c(0.2313, 0.4314, 0.6725)),
+  lambda = list(type = "frozen", value = 2)
+)
+
+## Define function for 1 simulation
+doOne <- function(K, M, MSDratio, tau, lambda){
+
+  ## Generate number of studies and determine at which studies to perform an inspection
+  numstudies <- rpois(K, 1.5)
+  numstudies <- ifelse(numstudies[] == 0, 1, numstudies[])  # set any 0's to 1
+  inspect <- cumsum(numstudies)  # this tells us at which studies we perform an inspection
+  numstudies_total <- sum(numstudies)  # total number of studies generated
+
+
+  ## We have Treatment Group X and Treatment Group Y; simulate standard deviations and sample sizes
+  studylabel <- c(1:numstudies_total)  # assign labels to each study
+  N <- ceiling(rnorm(numstudies_total, M, MSDratio*M))
+  N <- ifelse(N[] < 20, 20, N[])  # if N < 20, set the total sample size to 20
+  samplesize_ratio <- runif(numstudies_total, min = 0.4, max = 0.6)  # ratio = n_1j / N
+  n_1j <- samplesize_ratio*N
+  n_2j <- N-n_1j
+
+  # dataframe of all study data
+  studydata <- data.frame("Study" = studylabel, "Sample Size X" = n_1j, "Sample Size Y" = n_2j, check.names=FALSE)
+
+
+  ## Next: simulate tau's, within-study variation, and treatment difference (delta j)
+  if(tau == 0.2313){
+    mix1 <- runif(ceiling(0.5*numstudies_total), min=0.1, max = 1)
+    mix2 <- runif(ceiling(0.5*numstudies_total), min=1, max = 1/0.1)
+    mixcombo <- c(mix1, mix2)
+    ratio_sigmatau <- sample(mixcombo)
+  }
+
+  if(tau == 0.4314){
+    mix1 <- runif(ceiling(0.5*numstudies_total), min=0.2, max = 1)
+    mix2 <- runif(ceiling(0.5*numstudies_total), min=1, max = 1/0.2)
+    mixcombo <- c(mix1, mix2)
+    ratio_sigmatau <- sample(mixcombo)
+  }
+
+  if(tau == 0.6725){
+    mix1 <- runif(ceiling(0.5*numstudies_total), min=0.3, max = 1)
+    mix2 <- runif(ceiling(0.5*numstudies_total), min=1, max = 1/0.3)
+    mixcombo <- c(mix1, mix2)
+    ratio_sigmatau <- sample(mixcombo)
+  }
+
+  if(is.odd(numstudies_total)){
+    ratio_sigmatau <- head(ratio_sigmatau, -1)
+  }
+
+  # within-study variation (standard deviation)
+  sigma_study <- ratio_sigmatau*tau  
+  studydata[, "Study SD"] <- sigma_study  # add within-study variation to dataframe
+
+  # treatment difference (sample mean difference)
+  delta_j <- rnorm(numstudies_total, 0.2, tau)  # per study
+  D_j <- rnorm(numstudies_total, delta_j, sqrt((sigma_study^2/n_1j)+(sigma_study^2/n_2j)))  # sample mean difference follows normal distribution
+  studydata[, "Sample Mean Diff"] <- D_j  # add sample mean difference to dataframe
+
+
+  ## Next: find (cumulative) test statistics at each study, adjusted and naive
+  I_jplus <- ((sigma_study^2/n_1j)+(sigma_study^2/n_2j)+tau^2)^(-1)  # information/precision including tau in calculation, per study
+  
+  I_j <- ((sigma_study^2/n_1j)+(sigma_study^2/n_2j))^(-1)  # information/precision not including tau in calculation, per study
+  
+  S_k <- cumsum(I_jplus*D_j)  # weighted estimator of treatment difference
+  
+  I_ckplus <- cumsum(I_jplus)  # cumulative information including tau
+  
+  I_ck <- cumsum(I_j)  # cumulative information without tau
+  
+  lnpenalty <- log(log(I_ck))
+  
+  lnpenalty <- ifelse(lnpenalty[] < 1, 1, lnpenalty[])  # ln(ln(I_ck)) is set to 1 if it is smaller than 1 (to be conservative)
+  
+  teststat <- S_k/sqrt(lambda*I_ckplus*lnpenalty)
+  
+  studydata[, "Cum Test Stat"] <- teststat  # add cumulative test statistics to dataframe
+
+  teststat_naive <- S_k/sqrt(I_ckplus)
+  
+  studydata[, "Cum Naive Test Stat"] <- teststat_naive  # add naive cumulative test statistics to dataframe
+  
+  
+  ## Next: determine if committed false positive
+
+  # only check at studies that coincide with an inspection
+  
+  numfp <- numeric(length(inspect))  # keep track of number of false positives 
+  
+  naive_numfp <- numeric(length(inspect))  # naive false positives
+  
+  for(i in 1:length(inspect)){
+    numfp[i] <- ifelse(abs(teststat[inspect[i]]) > 1.96, 1, 0)
+    naive_numfp[i] <- ifelse(abs(teststat_naive[inspect[i]]) > 1.96, 1, 0)
+  }
+  index  <- c(ifelse(sum(numfp)==0,0,
+                 inspect[which.max(numfp)]), 
+            ifelse(sum(naive_numfp)==0,0,
+                 inspect[which.max(naive_numfp)]))
+
+  return(index)
+}
+
+res <- doLapply(varList, doOne = doOne)
+
+youres = getArray(res)
+
+youres_df = array2df(youres)
+
+meanindex <- youres_df %>% group_by(tau,K) %>% summarise(mean=mean(value[1])) %>% 
+  spread(key=tau, value=mean)
+
+meanindex_naive <- youres_df %>% group_by(tau,K) %>% summarise(mean=mean(value[2])) %>% 
+  spread(key=tau, value=mean)
+
+#ggplot(youres_df %>% filter(D.1==1), aes(x=value)) + geom_bar()  # adjusted
+
+#ggplot(youres_df %>% filter(D.1==2), aes(x=value)) + geom_bar()  # naive
+
+#ggplot(subset(youres_df, tau == 0.2313, D.1 == 1), aes(x=value)) + geom_bar()
+
+theme_update(plot.title = element_text(hjust = 0.5), text = element_text(size=12))
+
+ggplot(youres_df %>% filter(D.1==1), aes(x=value)) + geom_bar(width=5) + facet_grid(.~tau) + ggtitle("Rejection Count: Adjusted Test Stat, Levels of Tau, delta j = 0")
+
+ggplot(youres_df %>% filter(D.1==2), aes(x=value)) + geom_bar(width=5) + facet_grid(.~tau) + ggtitle("Rejection Count: Naive Test Stat, Levels of Tau, delta j = 0")
+
+ggplot(youres_df %>% filter(D.1==1), aes(x=value)) + geom_bar(width=5) + facet_grid(.~K) + ggtitle("Rejection Count: Adjusted Test Stat, Levels of K, delta j = 0")
+
+ggplot(youres_df %>% filter(D.1==2), aes(x=value)) + geom_bar(width=5) + facet_grid(.~K) + ggtitle("Rejection Count: Naive Test Stat, Levels of K, delta j = 0")
+
+
+```
+
+return the index which contains two values (index of proposed test statistic when it first goes above if ever, when the naive went above)
+compute proportion of times the first number is 0 over the number of replications, do the same for the second value (naive one should be too large)
+when it goes above: make bar graph/histrogram for when it happens (naive should stop quite early)
+do the bar graph for all 100,000 replications
+
+then, try 0, 0.2, 0.4
+
+
+

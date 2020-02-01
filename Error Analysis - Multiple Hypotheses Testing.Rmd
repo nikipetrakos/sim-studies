@@ -1,0 +1,308 @@
+---
+title: "Data Simulation"
+author: "Niki Petrakos"
+date: "February 17, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(multtest)
+library(NPC)
+library(PoissonSeq)
+library(mutoss)
+library(someKfwer)
+library(simsalapar)
+library(xlsx)
+
+kfweLR3=function (p, k = 1, alpha = 0.01, disp = TRUE) 
+{
+  s <- length(p)
+  sdconst <- rep(1, s)
+  sdconst[1:min(k, s)] <- k * alpha/s
+  if (s > k) 
+    sdconst[(k + 1):s] <- k * alpha/(s + k - ((k + 1):s))
+  ps <- sort(p)
+  u <- ps < sdconst
+  res <- 0
+  if (any(u)) {
+    w <- min(which(!u)) - 1
+    res <- ps[w]
+  }
+  
+  adjp <- p*alpha/res
+  p[which(p > res)] <- 1
+  p[p <= alpha] <- 0
+  h = (!p)
+  if (disp) {
+    #cat(paste("Lehmann e Romano k-FWER Step Down procedure\n ", 
+    #          length(p), " tests, k=", k, ", alpha=", alpha, "\n ", 
+    #          sum(h), " rejections\n\n", sep = ""))
+  }
+  adjp[adjp >1] <- 1
+  return(adjp)
+}
+```
+
+```{r, datasim}
+n <- 100
+set.seed(789)
+
+z <- rnorm(n,c(rep(0,0.9*n),runif(0.1*n,0,5)))  # test statistics
+rawpvalues <- numeric(n)  # create vector to store p-values
+
+for(i in 1:n){
+  rawpvalues[i] <- (1-pnorm(abs(z[i])))*2
+}
+
+```
+
+
+```{r, applycorrections}
+allpvalues <- data.frame("Label"=c(rep(0, 0.9*n), rep(1, 0.1*n)), "FDR"=rawpvalues)
+
+corrections <- mt.rawp2adjp(allpvalues$FDR, proc=c("Bonferroni", "Holm", "SidakSS", "SidakSD", "Hochberg", "BH", "SDBL", "BY", "Aug", "SDLR"))
+
+allpvalues <- merge(allpvalues, corrections$adjp, by.x="FDR", by.y="rawp")
+
+allpvalues$SDBL <- BL(allpvalues$FDR,0.05, TRUE)$adjPValues
+
+allpvalues$Aug <- augmentation(allpvalues$Bonferroni, "FDX", newQ=0.1, silent=TRUE)$adjPValues
+
+allpvalues$SDLR <- kfweLR3(allpvalues$FDR, k=0.1*n)   # tried to fix this
+
+#allpvalues
+
+
+temp <- data.frame("Efp"=numeric(), "Efn"=numeric(), "FWE"=numeric(), "FDR"=numeric(), "FDX"=numeric(), "FNR"=numeric())
+numrejections <- 0
+
+for(method in names(allpvalues)){
+  Efp <- sum(allpvalues[, method] < 0.05 & allpvalues[, "Label"] == 0)
+  Efn <- sum(allpvalues[, method] > 0.05 & allpvalues[, "Label"] == 1)
+  FWE <- ifelse(Efp >= 1, 1, 0)
+  FDR <- Efp/sum(Efp,Efn)
+  #FDR <- Efp/sum(allpvalues[, method] < 0.05 & (allpvalues[, "Label"] == 0 | allpvalues[, "Label"] == 1))
+  #ifelse(allpvalues[,method] < 0.05, numrejections <- numrejections+1, 0)
+  #FDR <- Efp/numrejections
+  #FDR <- Efp/sum(allpvalues[, method] < 0.05)
+  #FDR <- ifelse(allpvalues[,method] < 0.05, Efp/sum(allpvalues[, method] < 0.05), 0)
+  #FDR <- ifelse(allpvalues[,method] < 0.05, Efp/numrejections, 0)
+  FDX <- ifelse(FDR > 0.1, 1, 0)
+  FNR <- Efn/sum(allpvalues[, method] > 0.05)
+  
+  temp <- rbind(temp, data.frame("Efp"=Efp, "Efn"=Efn, "FWE"=FWE, "FDR"=FDR, "FDX"=FDX, "FNR"=FNR, row.names=method))
+}
+
+temp
+
+```
+
+```{r, replicatesims}
+# create setup for simulation
+varList <- varlist(
+  n.sim = list(type = "N", expr = quote(N[sim]), value = 1000),
+  n = list(type = "grid", value = c(100, 5000, 100000)),
+  prop = list(type = "grid", value = c(0.5,0.9))
+)
+
+# define function for 1 simulation
+doOne <- function(n,prop){
+
+  d = ceiling(n*prop)
+  z <- rnorm(n,c(rep(0,d),runif(n-d,0,5)))  # test statistics
+  rawpvalues <- numeric(n)  # create vector to store p-values
+  for(i in 1:n){
+    rawpvalues[i] <- (1-pnorm(abs(z[i])))*2  # store p-values in vector
+  }
+  
+  # create data frame that will hold raw p-values, label of "truth", and adjusted p-values 
+  allpvalues <- data.frame("Label"=c(rep(0, d), rep(1, n-d)), "pvals"=rawpvalues)
+
+  corrections <- mt.rawp2adjp(allpvalues$pvals, proc=c("Bonferroni", "Holm", "SidakSS", "SidakSD", "Hochberg", "BH", "SDBL", "BY", "Aug", "SDLR"))
+
+  allpvalues <- merge(allpvalues, corrections$adjp, by.x="pvals", by.y="rawp")
+
+  allpvalues$SDBL <- BL(allpvalues$pvals,0.05, TRUE)$adjPValues
+
+  allpvalues$Aug <- augmentation(allpvalues$Bonferroni, "FDX", newQ=0.1, silent=TRUE)$adjPValues
+
+  allpvalues$SDLR <- kfweLR3(allpvalues$pvals, k=n-d)
+  
+  # create data frame that will hold:
+  #E(false positives), E(false negatives), Fam-Wise Error Rate, False Discovery Rate, False Discovery eXceedence (i.e. tail prob of FDP), False Negative Rate
+  errorproportions <- data.frame("Efp"=numeric(), "Efn"=numeric(), "FWE"=numeric(), "FDR"=numeric(), "FDX"=numeric(), "FNR"=numeric())
+  
+  for(method in names(allpvalues)){ 
+    Efp <- sum(allpvalues[, method] < 0.05 & allpvalues[, "Label"] == 0)
+    Efn <- sum(allpvalues[, method] > 0.05 & allpvalues[, "Label"] == 1)
+    FWE <- ifelse(Efp >= 1, 1, 0)
+    FDR <- Efp/sum(Efp,Efn)
+    FDX <- ifelse(FDR > 0.1, 1, 0)
+    FNR <- Efn/sum(allpvalues[, method] > 0.05)
+  
+    errorproportions <- rbind(errorproportions, data.frame("Efp"=Efp, "Efn"=Efn, "FWE"=FWE, "FDR"=FDR, "FDX"=FDX, "FNR"=FNR, row.names=method))
+  }
+  
+  return(unlist(errorproportions))
+
+}
+#set.seed(123)
+res <- doLapply(varList, doOne = doOne)
+
+youres = getArray(res)
+
+youres_df = array2df(youres)
+
+#youres_df_final %>% head()
+```
+
+```{r}
+#youres_df
+
+my_methods = c("pvals", "Label", "Bonferroni", "Holm", "SidakSS", "SidakSD", 
+"Hochberg", "BH", "SDBL", "BY", "Aug", "SDLR")
+
+methods_frame = data_frame(Method=my_methods,MethodID=as.character(1:12))
+youres_df = youres_df %>% mutate(Criteria=substr(Var1,1,3),MethodID=substring(Var1,first=4))
+youres_df_final = inner_join(youres_df, methods_frame,by="MethodID")
+
+
+theme_update(plot.title = element_text(hjust = 0.5), text = element_text(size=15))
+
+############### CORRECT CODE: ###############
+
+meanEfp <- youres_df_final %>% filter(Criteria=="Efp") %>% group_by(Method,n,prop) %>% 
+  summarise(MeanEfp=mean(value)) %>% ungroup ()
+
+write.xlsx(meanEfp, "meanEfp.xlsx")
+
+meanEfn <- youres_df_final %>% filter(Criteria=="Efn") %>% group_by(Method,n,prop) %>% 
+  summarise(MeanEfn=mean(value)) %>% ungroup ()
+
+write.xlsx(meanEfn, "meanEfn.xlsx")
+
+meanFWE <- youres_df_final %>% filter(Criteria=="FWE") %>% group_by(Method,n,prop) %>% 
+  summarise(MeanFWE=mean(value)) %>% ungroup ()
+
+write.xlsx(meanFWE, "meanFWE.xlsx")
+
+meanFDR <- youres_df_final %>% filter(Criteria=="FDR") %>% group_by(Method,n,prop) %>% 
+  summarise(MeanFDR=mean(value)) %>% ungroup ()
+
+write.xlsx(meanFDR, "meanFDR.xlsx")
+
+meanFDX <- youres_df_final %>% filter(Criteria=="FDX") %>% group_by(Method,n,prop) %>% 
+  summarise(MeanFDX=mean(value)) %>% ungroup ()
+
+write.xlsx(meanFDX, "meanFDX.xlsx")
+
+meanFNR <- youres_df_final %>% filter(Criteria=="FNR") %>% group_by(Method,n,prop) %>% 
+  summarise(MeanFNR=mean(value)) %>% ungroup ()
+
+write.xlsx(meanFNR, "meanFNR.xlsx")
+
+# plots for different sizes of n, prop=0.5:
+
+# Efp:
+ggplot(meanEfp %>% filter(n=="1e+02", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanEfp)) + geom_point(size=4, col="lightblue") + ggtitle("Mean Expected False Positives Across Methods, n=100, prop=0.5")
+ggplot(meanEfp %>% filter(n=="5e+03", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanEfp)) + geom_point(size=4, col="lightblue") + ggtitle("Mean Expected False Positives Across Methods, n=5000, prop=0.5")
+ggplot(meanEfp %>% filter(n=="1e+05", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanEfp)) + geom_point(size=4, col="lightblue") + ggtitle("Mean Expected False Positives Across Methods, n=100000, prop=0.5")
+
+# Efn:
+ggplot(meanEfn %>% filter(n=="1e+02", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanEfn)) + geom_point(size=4, col="lightblue") + ggtitle("Mean Expected False Negatives Across Methods, n=100, prop=0.5")
+ggplot(meanEfn %>% filter(n=="5e+03", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanEfn)) + geom_point(size=4, col="lightblue") + ggtitle("Mean Expected False Negatives Across Methods, n=5000, prop=0.5")
+ggplot(meanEfn %>% filter(n=="1e+05", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanEfn)) + geom_point(size=4, col="lightblue") + ggtitle("Mean Expected False Negatives Across Methods, n=100000, prop=0.5")
+
+# FWE:
+ggplot(meanFWE %>% filter(n=="1e+02", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanFWE)) + geom_point(size=4, col="lightblue") + ggtitle("Mean FWER Across Methods, n=100, prop=0.5")
+ggplot(meanFWE %>% filter(n=="5e+03", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanFWE)) + geom_point(size=4, col="lightblue") + ggtitle("Mean FWER Across Methods, n=5000, prop=0.5")
+ggplot(meanFWE %>% filter(n=="1e+05", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanFWE)) + geom_point(size=4, col="lightblue") + ggtitle("Mean FWER Across Methods, n=100000, prop=0.5")
+
+# FDR:
+ggplot(meanFDR %>% filter(n=="1e+02", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanFDR)) + geom_point(size=4, col="lightblue") + ggtitle("Mean FDR Across Methods, n=100, prop=0.5")
+ggplot(meanFDR %>% filter(n=="5e+03", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanFDR)) + geom_point(size=4, col="lightblue") + ggtitle("Mean FDR Across Methods, n=5000, prop=0.5")
+ggplot(meanFDR %>% filter(n=="1e+05", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanFDR)) + geom_point(size=4, col="lightblue") + ggtitle("Mean FDR Across Methods, n=100000, prop=0.5")
+
+# FDX:
+ggplot(meanFDX %>% filter(n=="1e+02", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanFDX)) + geom_point(size=4, col="lightblue") + ggtitle("Mean FDX Across Methods, n=100, prop=0.5")
+ggplot(meanFDX %>% filter(n=="5e+03", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanFDX)) + geom_point(size=4, col="lightblue") + ggtitle("Mean FDX Across Methods, n=5000, prop=0.5")
+ggplot(meanFDX %>% filter(n=="1e+05", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanFDX)) + geom_point(size=4, col="lightblue") + ggtitle("Mean FDX Across Methods, n=100000, prop=0.5")
+
+# FNR:
+ggplot(meanFNR %>% filter(n=="1e+02", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanFNR)) + geom_point(size=4, col="lightblue") + ggtitle("Mean FNR Across Methods, n=100, prop=0.5")
+ggplot(meanFNR %>% filter(n=="5e+03", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanFNR)) + geom_point(size=4, col="lightblue") + ggtitle("Mean FNR Across Methods, n=5000, prop=0.5")
+ggplot(meanFNR %>% filter(n=="1e+05", prop=="0.5", Method!="Label"), 
+        aes(x=Method,y=MeanFNR)) + geom_point(size=4, col="lightblue") + ggtitle("Mean FNR Across Methods, n=100000, prop=0.5")
+
+
+# plots for different sizes of n, prop=0.9:
+
+# Efp:
+ggplot(meanEfp %>% filter(n=="1e+02", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanEfp)) + geom_point(size=4, col="pink") + ggtitle("Mean Expected False Positives Across Methods, n=100, prop=0.9")
+ggplot(meanEfp %>% filter(n=="5e+03", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanEfp)) + geom_point(size=4, col="pink") + ggtitle("Mean Expected False Positives Across Methods, n=5000, prop=0.9")
+ggplot(meanEfp %>% filter(n=="1e+05", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanEfp)) + geom_point(size=4, col="pink") + ggtitle("Mean Expected False Positives Across Methods, n=100000, prop=0.9")
+
+# Efn:
+ggplot(meanEfn %>% filter(n=="1e+02", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanEfn)) + geom_point(size=4, col="pink") + ggtitle("Mean Expected False Negatives Across Methods, n=100, prop=0.9")
+ggplot(meanEfn %>% filter(n=="5e+03", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanEfn)) + geom_point(size=4, col="pink") + ggtitle("Mean Expected False Negatives Across Methods, n=5000, prop=0.9")
+ggplot(meanEfn %>% filter(n=="1e+05", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanEfn)) + geom_point(size=4, col="pink") + ggtitle("Mean Expected False Negatives Across Methods, n=100000, prop=0.9")
+
+# FWE:
+ggplot(meanFWE %>% filter(n=="1e+02", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanFWE)) + geom_point(size=4, col="pink") + ggtitle("Mean FWER Across Methods, n=100, prop=0.9")
+ggplot(meanFWE %>% filter(n=="5e+03", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanFWE)) + geom_point(size=4, col="pink") + ggtitle("Mean FWER Across Methods, n=5000, prop=0.9")
+ggplot(meanFWE %>% filter(n=="1e+05", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanFWE)) + geom_point(size=4, col="pink") + ggtitle("Mean FWER Across Methods, n=100000, prop=0.9")
+
+# FDR:
+ggplot(meanFDR %>% filter(n=="1e+02", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanFDR)) + geom_point(size=4, col="pink") + ggtitle("Mean FDR Across Methods, n=100, prop=0.9")
+ggplot(meanFDR %>% filter(n=="5e+03", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanFDR)) + geom_point(size=4, col="pink") + ggtitle("Mean FDR Across Methods, n=5000, prop=0.9")
+ggplot(meanFDR %>% filter(n=="1e+05", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanFDR)) + geom_point(size=4, col="pink") + ggtitle("Mean FDR Across Methods, n=100000, prop=0.9")
+
+# FDX:
+ggplot(meanFDX %>% filter(n=="1e+02", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanFDX)) + geom_point(size=4, col="pink") + ggtitle("Mean FDX Across Methods, n=100, prop=0.9")
+ggplot(meanFDX %>% filter(n=="5e+03", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanFDX)) + geom_point(size=4, col="pink") + ggtitle("Mean FDX Across Methods, n=5000, prop=0.9")
+ggplot(meanFDX %>% filter(n=="1e+05", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanFDX)) + geom_point(size=4, col="pink") + ggtitle("Mean FDX Across Methods, n=100000, prop=0.9")
+
+# FNR:
+ggplot(meanFNR %>% filter(n=="1e+02", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanFNR)) + geom_point(size=4, col="pink") + ggtitle("Mean FNR Across Methods, n=100, prop=0.9")
+ggplot(meanFNR %>% filter(n=="5e+03", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanFNR)) + geom_point(size=4, col="pink") + ggtitle("Mean FNR Across Methods, n=5000, prop=0.9")
+ggplot(meanFNR %>% filter(n=="1e+05", prop=="0.9", Method!="Label"), 
+        aes(x=Method,y=MeanFNR)) + geom_point(size=4, col="pink") + ggtitle("Mean FNR Across Methods, n=100000, prop=0.9")
+
+
+```
